@@ -10,3 +10,5 @@ Key features include:
 - Interactive input parameters for easy scenario analysis
 
 This tool is useful for call center managers and operations analysts aiming to improve scheduling and service levels through data-driven staffing decisions.
+
+Access the app here - https://eccstaffing.streamlit.app/
