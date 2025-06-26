@@ -4,12 +4,9 @@ This Streamlit app implements a staffing model designed for call centers managin
 
 Key features include:
 
-Support for inbound and outbound call staffing calculations
-
-Consideration of agent availability and shift patterns
-
-Modeling of blended agent roles to maximize efficiency
-
-Interactive input parameters for easy scenario analysis
+- Support for inbound and outbound call staffing calculations
+- Consideration of agent availability and shift patterns
+- Modeling of blended agent roles to maximize efficiency
+- Interactive input parameters for easy scenario analysis
 
 This tool is useful for call center managers and operations analysts aiming to improve scheduling and service levels through data-driven staffing decisions.
