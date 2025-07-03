@@ -1,19 +1,13 @@
-# 🎈 Blank app template
+ECC Staffing Model
 
-A simple Streamlit app template for you to modify!
+This Streamlit app implements a staffing model designed for call centers managing both inbound and outbound operations. It helps forecast staffing needs, taking into account call volumes, agent schedules, and workload blending to optimize resource allocation.
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
+Key features include:
 
-### How to run it on your own machine
+Support for inbound and outbound call staffing calculations
+Consideration of agent availability and shift patterns
+Modeling of blended agent roles to maximize efficiency
+Interactive input parameters for easy scenario analysis
+This tool is useful for call center managers and operations analysts aiming to improve scheduling and service levels through data-driven staffing decisions.
 
-1. Install the requirements
-
-   ```
-   $ pip install -r requirements.txt
-   ```
-
-2. Run the app
-
-   ```
-   $ streamlit run streamlit_app.py
-   ```
+Access the app here - https://eccstaffing.streamlit.app/
