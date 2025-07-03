@@ -71,32 +71,35 @@ st.set_page_config(layout="wide")
 st.title("📞 ECC Staffing Simulator")
 st.write("This tool helps determine the number of FTEs needed to staff an ECC Pod based on the Erlang model, which accounts for caller abandonment.")
 
-col1, col2 = st.columns(2)
+col1, = st.columns(1)
 
 with col1:
-    st.header("Inbound")
+    st.divider()
+    st.header("Inbound Demand")
     calls_per_day = st.number_input("Total Calls per Day", min_value=1, value=250, help="Total Number of Inbound Calls expected for a day")
     aht_sec = st.number_input("Average Handle Time (seconds)", min_value=1, value=600,help="Average Handle Time including ACW.")
-    target_sla = st.slider("Target Service Level (%)", min_value=50, max_value=100, value=80, step=1, help="The percentage of calls to be answered within the threshold.")
-    sla_threshold_sec = st.number_input("Service Level Threshold (seconds)", value=30)
 
-with col2:
-    st.header("Patience and Shrinkage")
+    st.divider()
+    st.header("Outbound Demand")
+    outbound_referrals_per_day = st.number_input("Outbound Tasks or Referrals per Day", min_value=0, value=90)
+    avg_time_per_referral_sec = st.number_input("Average Time per Outbound Task (seconds)", min_value=1, value=300)
+
+    st.divider()
+    st.header("Goals and Shrinkage")
+    target_sla = st.slider("Target Service Level (%)", min_value=50, max_value=100, value=80, step=1, help="The percentage of calls to be answered within the threshold.")
+    sla_threshold_sec = st.number_input("Service Level Threshold (seconds)", value=30, step =5)
     target_answer_rate = st.slider("Target Answer Rate (%)", min_value=50, max_value=100, value=95, step=1, help="The target percentage of total calls that should be answered (not abandoned).")
-    avg_patience_sec = st.number_input("Average Patience (seconds)", min_value=1, value=120, help="The average time a caller will wait in queue before hanging up.")
     shrinkage = st.slider("Shrinkage (%)", min_value=0, max_value=100, value=20, step=1, help="Percentage of paid time that agents are not available to handle calls (meetings, breaks, etc.).")
 
 
-st.divider()
-st.header("Outbound Tasks")
-outbound_referrals_per_day = st.number_input("Outbound Tasks or Referrals per Day", min_value=0, value=90)
-avg_time_per_referral_sec = st.number_input("Average Time per Outbound Task (seconds)", min_value=1, value=300)
+
 
 
 if st.button("Calculate Required FTE", type="primary", use_container_width=True):
     # --- Calculations ---
     avg_calls_per_hour = calls_per_day / hours_of_operation
-    
+    avg_patience_sec = 150
+
     # 1. Calculate FTE for Inbound Calls
     inbound_fte_on_floor = erlang_a_fte(
         calls_per_hour=avg_calls_per_hour,
