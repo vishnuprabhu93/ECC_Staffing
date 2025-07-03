@@ -81,7 +81,7 @@ with col1:
     sla_threshold_sec = st.number_input("Service Level Threshold (seconds)", value=30)
 
 with col2:
-    st.header("Patience & Shrinkage")
+    st.header("Patience and Shrinkage")
     target_answer_rate = st.slider("Target Answer Rate (%)", min_value=50, max_value=100, value=95, step=1, help="The target percentage of total calls that should be answered (not abandoned).")
     avg_patience_sec = st.number_input("Average Patience (seconds)", min_value=1, value=120, help="The average time a caller will wait in queue before hanging up.")
     shrinkage = st.slider("Shrinkage (%)", min_value=0, max_value=100, value=20, step=1, help="Percentage of paid time that agents are not available to handle calls (meetings, breaks, etc.).")
