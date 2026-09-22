@@ -1,133 +1,165 @@
+import altair as alt
+import pandas as pd
 import streamlit as st
-import math
 
-# --- Erlang A Function (Revised for Answer Rate and Accuracy) ---
-def erlang_a_fte(
-    calls_per_hour,
-    aht_sec,
-    target_sla=0.80,
-    sla_threshold_sec=30,
-    target_answer_rate=0.95,
-    avg_patience_sec=120, # Average time a customer will wait before abandoning
-    max_agents=100,
-    shrinkage=0.30
-):
-    """
-    Calculates the required number of agents using the Erlang A formula.
+from staffing import Inputs, blended_plan, dedicated_plan, erlang_c_agents, inbound_curve
 
-    This version solves for the number of agents (N) needed to simultaneously
-    meet a Service Level (SL) target and an Answer Rate target.
-    """
-    lambda_per_sec = calls_per_hour / 3600
-    mu = 1 / aht_sec
-    theta = 1 / avg_patience_sec  # Abandonment rate (alpha in some texts)
-
-    # Iterate through the number of agents to find the minimum required
-    for n in range(1, max_agents):
-        rho = lambda_per_sec / (n * mu)  # Traffic intensity
-
-        # System must be stable (traffic intensity < 1)
-        if rho >= 1:
-            continue
-
-        # --- Erlang C base calculation ---
-        erlang_b = ((lambda_per_sec / mu)**n / math.factorial(n))
-        sum_erlang_b = sum(((lambda_per_sec / mu)**k / math.factorial(k)) for k in range(n))
-        p0 = 1 / (sum_erlang_b + erlang_b / (1 - rho))
-        
-        # Probability of Waiting (Pw), using the Erlang C formula
-        pw = (erlang_b / (1 - rho)) * p0
-
-        # --- Check against targets ---
-        
-        # 1. Calculate Service Level (SL)
-        # SL = 1 - P(wait > threshold) = 1 - Pw * e^(-(N*µ - λ)*t)
-        exponent_sl = -((n * mu) - lambda_per_sec) * sla_threshold_sec
-        service_level = 1 - (pw * math.exp(exponent_sl))
-
-        # 2. Calculate Answer Rate
-        # Answer Rate = 1 - Abandonment Rate
-        # Abandonment Rate = Pw * (θ / (N*µ + θ - λ)) -> this can be unstable
-        # A more stable approximation: Abandonment Rate = Pw * (θ / (N*µ + θ))
-        prob_abandon_given_wait = theta / (n * mu + theta)
-        abandonment_rate = pw * prob_abandon_given_wait
-        answer_rate = 1 - abandonment_rate
-
-        # 3. Check if both conditions are met
-        if service_level >= target_sla and answer_rate >= target_answer_rate:
-            # Return the number of agents, adjusted for shrinkage
-            return math.ceil(n / (1 - shrinkage))
-
-    return None # Return None if no solution is found within max_agents
-
-# --- App Constants ---
-hours_of_operation = 9      # Total hours the call center is open
-agent_work_hours = 8        # Hours an agent works in a shift
-# This ratio calculates the extra staff needed to cover all open hours with shorter shifts
-coverage_factor = hours_of_operation / agent_work_hours
-
-# --- Streamlit App UI ---
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="ECC Staffing Simulator", layout="wide")
 st.title("📞 ECC Staffing Simulator")
-st.write("This tool helps determine the number of FTEs needed to staff an ECC Pod based on the Erlang model, which accounts for caller abandonment.")
+st.caption("Daily FTE requirement using exact Erlang A (with caller abandonment). "
+           "Compares a dedicated inbound + outbound team with a blended team.")
 
-col1, = st.columns(1)
+# ---------------------------------------------------------------- inputs
+with st.sidebar.form("inputs"):
+    st.header("Inbound demand")
+    calls_per_day = st.number_input("Calls per day", min_value=1, value=250)
+    aht_sec = st.number_input("Average handle time, incl. ACW (sec)", min_value=1, value=600)
+    patience_sec = st.number_input(
+        "Average caller patience (sec)", min_value=5, value=150,
+        help="Average time a caller waits before hanging up. Estimate from phone data as "
+             "total wait time of ALL calls ÷ number of abandoned calls.")
 
-with col1:
-    st.divider()
-    st.header("Inbound Demand")
-    calls_per_day = st.number_input("Total Calls per Day", min_value=1, value=250, help="Total Number of Inbound Calls expected for a day")
-    aht_sec = st.number_input("Average Handle Time (seconds)", min_value=1, value=600,help="Average Handle Time including ACW.")
+    st.header("Outbound demand")
+    ob_tasks = st.number_input("Outbound tasks per day", min_value=0, value=90)
+    ob_aht = st.number_input("Average time per outbound task (sec)", min_value=1, value=300)
+    ob_target = st.slider("Outbound tasks completed same day (%)", 50, 100, 98,
+                          help="Used for the blended team only.")
 
-    st.divider()
-    st.header("Outbound Demand")
-    outbound_referrals_per_day = st.number_input("Outbound Tasks or Referrals per Day", min_value=0, value=90)
-    avg_time_per_referral_sec = st.number_input("Average Time per Outbound Task (seconds)", min_value=1, value=300)
+    st.header("Goals")
+    target_sl = st.slider("Service level (%)", 50, 100, 80)
+    sl_threshold = st.number_input("Service level threshold (sec)", min_value=5, value=30, step=5)
+    target_ar = st.slider("Answer rate (%)", 50, 100, 95)
+    max_occ = st.slider("Maximum occupancy (%)", 50, 100, 85,
+                        help="Cap on the share of on-floor time agents spend working, to limit burnout.")
 
-    st.divider()
-    st.header("Goals and Shrinkage")
-    target_sla = st.slider("Target Service Level (%)", min_value=50, max_value=100, value=80, step=1, help="The percentage of calls to be answered within the threshold.")
-    sla_threshold_sec = st.number_input("Service Level Threshold (seconds)", value=30, step =5)
-    target_answer_rate = st.slider("Target Answer Rate (%)", min_value=50, max_value=100, value=95, step=1, help="The target percentage of total calls that should be answered (not abandoned).")
-    shrinkage = st.slider("Shrinkage (%)", min_value=0, max_value=100, value=20, step=1, help="Percentage of paid time that agents are not available to handle calls (meetings, breaks, etc.).")
+    st.header("Schedule")
+    hours_open = st.number_input("Hours open per day", min_value=1.0, max_value=24.0, value=9.0, step=0.5)
+    shift_hours = st.number_input("Paid hours per agent shift", min_value=1.0, max_value=12.0, value=8.0, step=0.5)
+    shrinkage = st.slider("Shrinkage (%)", 0, 60, 20,
+                          help="Paid time not available for work: breaks, meetings, training, PTO.")
+
+    submitted = st.form_submit_button("Calculate", type="primary", width="stretch")
+
+x = Inputs(calls_per_day, aht_sec, ob_tasks, ob_aht, hours_open, shift_hours,
+           target_sl / 100, sl_threshold, target_ar / 100, patience_sec,
+           shrinkage / 100, max_occ / 100, ob_target / 100)
 
 
+@st.cache_data(show_spinner=False)
+def run_blended(key: tuple, start: int):
+    return blended_plan(Inputs(*key), start)
 
 
+ded = dedicated_plan(x)
+if ded.inbound is None:
+    st.error("No staffing level up to 1,000 agents meets these goals. Check the inputs.")
+    st.stop()
 
-if st.button("Calculate Required FTE", type="primary", use_container_width=True):
-    # --- Calculations ---
-    avg_calls_per_hour = calls_per_day / hours_of_operation
-    avg_patience_sec = 150
+with st.spinner("Simulating the blended team (300 days)…"):
+    key = tuple(x.__dict__.values())
+    bl = run_blended(key, ded.inbound.agents)
 
-    # 1. Calculate FTE for Inbound Calls
-    inbound_fte_on_floor = erlang_a_fte(
-        calls_per_hour=avg_calls_per_hour,
-        aht_sec=aht_sec,
-        target_sla=(target_sla / 100),
-        sla_threshold_sec=sla_threshold_sec,
-        target_answer_rate=(target_answer_rate / 100),
-        avg_patience_sec=avg_patience_sec,
-        shrinkage=0 # Shrinkage is applied to the final rostered FTE
+# ---------------------------------------------------------------- summary
+tab_sum, tab_in, tab_why, tab_how = st.tabs(
+    ["Staffing summary", "Inbound detail", "Why Erlang A", "Method and assumptions"])
+
+with tab_sum:
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Option 1: Dedicated teams")
+        st.metric("Total FTE", f"{ded.total_fte:.1f}")
+        a, b = st.columns(2)
+        a.metric("Inbound FTE", f"{ded.inbound_fte:.1f}",
+                 help=f"{ded.inbound.agents} agents on the phones every open hour")
+        b.metric("Outbound FTE", f"{ded.outbound_fte:.1f}",
+                 help=f"{x.ob_work_hours:.1f} hours of outbound work per day")
+        m = ded.inbound
+        st.write(f"Inbound results with **{m.agents} agents on floor**: service level "
+                 f"{m.service_level:.1%}, answer rate {m.answer_rate:.1%}, "
+                 f"occupancy {m.occupancy:.0%}, average wait {m.avg_wait_sec:.0f} s.")
+    with c2:
+        st.subheader("Option 2: Blended team")
+        if bl.agents is None:
+            st.warning("No blended team within 15 agents of the inbound requirement met all goals.")
+        else:
+            s = bl.sim
+            st.metric("Total FTE", f"{bl.fte:.1f}",
+                      delta=f"{bl.fte - ded.total_fte:+.1f} vs dedicated", delta_color="inverse")
+            a, b = st.columns(2)
+            a.metric("Agents on floor", bl.agents)
+            b.metric("Agents held for calls", bl.reserve,
+                     help="Outbound work starts only when more than this many agents would stay idle.")
+            st.write(f"Simulated results: service level {s['service_level']:.1%}, answer rate "
+                     f"{s['answer_rate']:.1%}, outbound completed {s['outbound_done']:.1%}, "
+                     f"occupancy {s['occupancy']:.0%}. On the worst 10% of days service level "
+                     f"falls to {s['sl_p10']:.0%}.")
+    st.info("Blended agents work outbound tasks in the idle time between calls, so outbound "
+            "work is partly absorbed by the inbound staffing. Calls always take priority.")
+
+# ---------------------------------------------------------------- inbound detail
+with tab_in:
+    n0 = ded.inbound.agents
+    df = pd.DataFrame(inbound_curve(x, n0 - 4, n0 + 5))
+    long = df.melt("Agents on floor", ["Service level (Erlang A)", "Answer rate (Erlang A)"],
+                   var_name="Measure", value_name="Value")
+    base = alt.Chart(long).encode(
+        x=alt.X("Agents on floor:O", title="Agents on floor", axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("Value:Q", title=None, axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1])),
+        color=alt.Color("Measure:N", legend=alt.Legend(orient="top", title=None),
+                        scale=alt.Scale(domain=["Service level (Erlang A)", "Answer rate (Erlang A)"],
+                                        range=["#2a78d6", "#eb6834"])),
+        tooltip=["Agents on floor", "Measure", alt.Tooltip("Value:Q", format=".1%")],
     )
-    
-    if inbound_fte_on_floor:
-        # Adjust for shrinkage and shift coverage to get total rostered FTE
-        total_inbound_fte = inbound_fte_on_floor * coverage_factor / (1 - (shrinkage/100))
+    targets = pd.DataFrame({"y": [x.target_sl, x.target_answer_rate]})
+    rules = alt.Chart(targets).mark_rule(strokeDash=[4, 4], color="#888").encode(y="y:Q")
+    st.altair_chart((base.mark_line(strokeWidth=2) + base.mark_point(size=64, filled=True) + rules)
+                    .properties(height=320), width="stretch")
+    st.caption("Dashed lines show the service level and answer rate goals.")
+    show = df.copy()
+    for col in ["Service level (Erlang A)", "Answer rate (Erlang A)", "Service level (Erlang C)", "Occupancy"]:
+        show[col] = show[col].map(lambda v: "unstable" if pd.isna(v) else f"{v:.1%}")
+    show["Avg wait (s)"] = show["Avg wait (s)"].round(0)
+    show["Rostered FTE"] = show["Rostered FTE"].round(1)
+    st.dataframe(show, hide_index=True, width="stretch")
 
-        # 2. Calculate FTE for Outbound Tasks
-        total_ob_seconds = outbound_referrals_per_day * avg_time_per_referral_sec
-        agent_productive_seconds_per_day = agent_work_hours * 3600 * (1 - (shrinkage/100))
-        outbound_fte = total_ob_seconds / agent_productive_seconds_per_day if agent_productive_seconds_per_day > 0 else 0
+# ---------------------------------------------------------------- why Erlang A
+with tab_why:
+    nc = erlang_c_agents(x)
+    st.markdown(f"""
+**Erlang C assumes every caller waits forever.** Real callers hang up. Because of that, Erlang C
+- overstates how long the queue gets and how many callers wait,
+- cannot predict answer rate or abandonment at all, so it cannot staff to an answer-rate goal,
+- becomes unusable (infinite wait) whenever calls exceed agent capacity.
 
-        # --- Display Results ---
-        st.success(f"### Total FTE Required: {total_inbound_fte + outbound_fte:.1f}")
-        
-        res_col1, res_col2 = st.columns(2)
-        with res_col1:
-            st.metric(label="Inbound FTE Required", value=f"{total_inbound_fte:.1f}")
-        with res_col2:
-            st.metric(label="Outbound FTE Required", value=f"{outbound_fte:.1f}")
+**Erlang A adds caller patience.** Callers who hang up shorten the queue for everyone else, so
+Erlang A gives a realistic service level *and* the answer rate. With infinite patience it
+reduces exactly to Erlang C.
 
-    else:
-        st.error("Could not compute FTE with the given parameters. Try increasing Average Patience or lowering targets.")
+For the current inputs: Erlang C needs **{nc if nc else "n/a"}** agents to hit the service level goal
+(and cannot check answer rate). Erlang A needs **{ded.inbound.agents}** agents to hit both goals.
+The table on the Inbound detail tab shows both service levels side by side.
+""")
+
+# ---------------------------------------------------------------- method
+with tab_how:
+    st.markdown(f"""
+**Inbound (both options).** Calls per hour = calls per day ÷ hours open (volume assumed flat through
+the day). The exact Erlang A (M/M/n+M) model gives service level, answer rate, occupancy and
+average wait for each headcount. The required headcount is the smallest that meets the service
+level, answer rate and maximum occupancy goals. Service level counts calls answered within the
+threshold as a share of all offered calls, so early hang-ups count against it.
+
+**Converting agents to FTE.** FTE = agents on floor × (hours open ÷ shift hours) ÷ (1 − shrinkage).
+Currently {x.hours_open:g} ÷ {x.shift_hours:g} and {x.shrinkage:.0%} shrinkage.
+
+**Dedicated outbound.** FTE = outbound work hours ÷ (shift hours × (1 − shrinkage) × max occupancy).
+
+**Blended team.** A day-long simulation (300 simulated days) in which all agents take calls first
+and work outbound tasks when no call is waiting and more than a set number of agents would remain
+idle. The app searches for the smallest team and reserve setting (0, 1 or 2) that meets every goal.
+Outbound tasks are not interrupted once started, so calls can wait behind them. This cost is
+captured by the simulation.
+
+**Assumptions.** Random (Poisson) call arrivals, exponentially distributed handle time and patience,
+flat volume across the day, and outbound tasks arriving evenly across the day.
+""")
